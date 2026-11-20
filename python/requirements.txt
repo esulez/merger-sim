@@ -1,0 +1,5 @@
+numpy>=1.26
+pandas>=2.0
+scipy>=1.11
+# optional: structural (BLP) demand estimation extension and bundled Nevo/BLP datasets
+# pyblp>=1.2
