@@ -1,0 +1,469 @@
+% Calibrated merger simulation: mechanics and logit vs. linear demand
+% Canonical (LaTeX) version of docs/calibrated_merger_simulation.md
+% Compile from the docs/ directory, twice for cross-references:
+%   pdflatex calibrated_merger_simulation.tex
+\documentclass[11pt,a4paper]{article}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage[table]{xcolor}
+\usepackage{url}
+\usepackage{caption}
+\usepackage{hyperref}
+\hypersetup{colorlinks=true,linkcolor=blue,urlcolor=blue,citecolor=blue}
+
+\title{Calibrated Merger Simulation:\\ Mechanics, and Logit vs.\ Linear Demand}
+\author{merger-sim project}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This note explains the mechanics of the calibrated merger simulation implemented in
+\path|python/mergersim/|: the three-step recipe (calibrate demand from pre-merger
+shares, prices and margins; impute marginal costs from the Nash--Bertrand first-order
+conditions; re-solve the pricing game under the post-merger ownership matrix), a
+side-by-side treatment of \emph{logit} and \emph{linear} demand, the diagnostics used
+in practice (diversion ratios, HHI, upward pricing pressure, welfare), figures, and
+pointers to the exact lines of code implementing each piece. The literature behind the
+method is reviewed in \path|docs/literature.md| \cite{farrell1990,farrell2010,hlz1994,werden1994,blp1995,nevo2001,peters2006,budzinski2010,nevoWhinston2010}.
+\end{abstract}
+
+\section{The three-step recipe}
+\label{sec:recipe}
+
+A calibrated merger simulation predicts the effect of a hypothetical horizontal merger
+using only \emph{pre-merger} data. The standard recipe \cite{hlz1994,werden1994} has
+three steps:
+\begin{enumerate}
+\item \textbf{Calibrate demand} for the $J$ products in the market from observed shares
+  $s_j$, prices $p_j$ and margins $m_j = p_j - c_j$. Implemented in
+  \path|LogitDemand.calibrate| (\path|python/mergersim/demand.py:28|) and
+  \path|LinearDemand.calibrate| (\path|python/mergersim/demand.py:112|), dispatched by
+  \path|Market.calibrated(..., demand_type=...)| (\path|python/mergersim/market.py:25|).
+\item \textbf{Impute marginal costs} $c_j = p_j - m_j$ from the pre-merger
+  Nash--Bertrand first-order conditions (FOCs) --- this is what identifies the price
+  coefficient(s) of the demand system. See Sections~\ref{sec:demand}--\ref{sec:supply}.
+\item \textbf{Re-solve the pricing game} under the post-merger ownership matrix
+  $\Omega^{post}$ and compare equilibria: prices, shares, HHI, diversion ratios,
+  upward pricing pressure (UPP), profits and consumer surplus. Implemented in
+  \path|simulate_merger| (\path|python/mergersim/simulation.py:58|); equilibrium solving
+  in \path|Market.solve_prices| (\path|python/mergersim/market.py:72|).
+\end{enumerate}
+
+A lighter-weight screen that skips step~3 is \textbf{UPP} \cite{farrell2010}, computed
+in \path|upward_pricing_pressure| (\path|python/mergersim/simulation.py:45|) --- see
+Section~\ref{sec:diagnostics}.
+
+\section{Setup and notation}
+\label{sec:setup}
+
+One market with $J$ differentiated products, market size $M$ (population; per-capita
+analysis is $M=1$), and firms $f=1..F$ with ownership matrix
+$$\Omega_{ij} = \mathbf{1}\{\text{products } i,j \text{ owned by the same firm}\}$$
+(\path|Market.ownership|, \path|python/mergersim/market.py:48|). Quantities
+$q_j = M s_j$. Firms set prices simultaneously (Nash--Bertrand); firm $f$ maximises
+$$\pi_f = \sum_{j \in f} (p_j - c_j)\, q_j .$$
+
+\section{Demand systems}
+\label{sec:demand}
+
+\subsection{Logit demand --- \texttt{LogitDemand} (\path|python/mergersim/demand.py:19|)}
+
+Mean utility $\delta_j = \beta_j - a\, p_j$ with outside good $\delta_0 = 0$, so
+\begin{equation}\label{eq:logit}
+s_j(p) = \frac{e^{\delta_j}}{1 + \sum_k e^{\delta_k}}, \qquad s_0 = 1 - \sum_j s_j .
+\end{equation}
+\path|LogitDemand.shares| (\path|demand.py:55|) evaluates this; the price coefficient
+is stored as \path|a = -alpha > 0| and $\delta_j = \texttt{intercepts}_j - a\, p_j$.
+
+\textbf{Calibration} (\path|demand.py:28|): invert the share equation,
+$\delta_j = \ln s_j - \ln s_0$, and use the pre-merger FOC of a single-product firm,
+\begin{equation}\label{eq:logitcal}
+p_j - c_j = \frac{1}{a\,(1 - s_j)}
+\quad\Longrightarrow\quad
+a = \operatorname{mean}_j \frac{1}{(p_j - c_j)(1 - s_j)} ,
+\end{equation}
+then $\beta_j = \delta_j + a\, p_j$. (With multi-product firms the per-product values
+differ; averaging is the standard practical fix, as in \cite{hlz1994}.)
+
+\textbf{Elasticities} (\path|demand.py:71|): $\partial s_j/\partial p_j = -a\, s_j
+(1-s_j)$, $\partial s_j/\partial p_k = a\, s_j s_k$ ($k \neq j$); the full Jacobian
+$A_{ji} = \partial s_j/\partial p_i$ is \path|demand.py:66|.
+
+\textbf{Diversion ratios} (\path|demand.py:77|):
+\begin{equation}\label{eq:logitD}
+D_{ij} = \frac{\partial s_j/\partial p_i}{-\partial s_i/\partial p_i}
+       = \frac{s_j}{1 - s_i}
+\end{equation}
+--- share-proportional, and \emph{varying with prices} (see Fig.~\ref{fig:div}).
+
+\textbf{Consumer surplus} (\path|demand.py:84|): closed form
+\begin{equation}\label{eq:logitCS}
+CS(p) = \frac{1}{a}\ln\!\Big(1 + \sum_j e^{\delta_j(p)}\Big)
+\qquad \text{(per capita; total } = M \cdot CS\text{).}
+\end{equation}
+
+\subsection{Linear demand --- \texttt{LinearDemand} (\path|python/mergersim/demand.py:92|)}
+
+Per-capita linear demand over the inside goods only (no outside good):
+\begin{equation}\label{eq:linear}
+s(p) = a - B\, p, \qquad q = M\, s, \qquad B_{ji} = -\frac{\partial s_j}{\partial p_i},
+\end{equation}
+with $B_{jj} > 0$ and $B_{ij} \le 0$ for substitutes. \path|shares| is
+\path|demand.py:132|, the Jacobian is the constant matrix $-B$ (\path|demand.py:141|).
+
+\textbf{Calibration} (\path|demand.py:112|) --- and here is the key identification
+difference vs.\ logit. The pre-merger FOC of a single-product firm gives only the
+\emph{own slope}:
+\begin{equation}\label{eq:linearcal}
+q_j = m_j\,(-\partial q_j/\partial p_j)
+\;\Longrightarrow\; B_{jj} = \frac{s_j}{m_j} \quad \text{(per capita).}
+\end{equation}
+The \emph{cross slopes are not identified} from one market's $(s,p,m)$: they require
+diversion ratios, because $D_{ij} = -B_{ij}/B_{jj}$, i.e.
+\begin{equation}\label{eq:linearcross}
+B_{ij} = -D_{ij}\, B_{jj} \qquad (i \neq j).
+\end{equation}
+By default the code proxies $D_{ij} = s_j/(1-s_i)$ (share-proportional, the logit
+formula, as in \cite{farrell2010}'s $REC \cdot s_j/(1-s_i)$); pass \path|diversion=| to
+\path|Market.calibrated| / \path|LinearDemand.calibrate| to use estimated diversion
+ratios. Intercepts then follow from $a = s + Bp$.
+
+\textbf{Closed-form equilibrium} (\path|demand.py:165|): with linear demand the FOCs
+are a linear system, so the Nash--Bertrand equilibrium has the exact solution
+\begin{equation}\label{eq:closedform}
+p^{*} = (B + B^{\top}\Omega)^{-1}\,(a + B^{\top}\Omega\, c) .
+\end{equation}
+\path|Market.solve_prices| (\path|market.py:72|) uses this whenever the demand object
+provides \path|closed_form_prices|.
+
+\textbf{Consumer surplus} (\path|demand.py:157|): exact quadratic form of the
+underlying quasi-linear utility, with $\alpha = B^{-1}a$:
+\begin{equation}\label{eq:linearCS}
+CS(p) = \alpha^{\top} s - \tfrac12 s^{\top} B^{-1} s - p^{\top} s .
+\end{equation}
+
+\textbf{Caveats} (visible in the figures below): shares can go \emph{negative} at high
+prices (Fig.~\ref{fig:demand}), inside shares sum to one (no outside good --- unlike the
+cereal data, where inside shares sum to $\approx 0.70$), diversion ratios are
+\emph{constant} in prices (Fig.~\ref{fig:div}), and niche products can get implausible
+``corner'' prices after a merger (Fig.~\ref{fig:cereal}, +525\% on a 0.2\%-share
+product; one product's simulated share goes negative).
+
+\subsection{Logit vs.\ linear at a glance}
+
+\begin{table}[h]
+\centering
+\caption{Logit vs.\ linear demand in the calibrated simulation}
+\label{tab:compare}
+\begin{tabular}{@{}lll@{}}
+\toprule
+property & logit & linear \\
+\midrule
+shares & bounded in $(0,1)$, outside good $s_0>0$ & can go negative; $\sum_j s_j = 1$ \\
+price coef(s) identified from $(s,p,m)$ & one scalar $a$ & own slopes $B_{jj}$ only; cross slopes need $D$ \\
+diversion $D_{ij}$ & $s_j/(1-s_i)$, varies with prices & $-B_{ij}/B_{jj}$, constant \\
+post-merger equilibrium & numerical (fixed point $+$ root finding) & closed form, Eq.~\eqref{eq:closedform} \\
+consumer surplus & closed form, Eq.~\eqref{eq:logitCS} & quadratic form, Eq.~\eqref{eq:linearCS} \\
+code & \path|demand.py:19--90| & \path|demand.py:92--168| \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.75\textwidth]{figures/fig1_demand_forms.png}
+\caption{Own-price demand curve for product F2B19 in cereal market C01Q1 (calibrated at
+the observed price, dashed line), other prices fixed. The logit curve stays in $(0,1)$
+and flattens as the outside good absorbs demand; the linear curve is a straight line
+that crosses zero. Generated by \path|python/examples/make_figures.py:20|.}
+\label{fig:demand}
+\end{figure}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.75\textwidth]{figures/fig2_diversion_forms.png}
+\caption{Diversion ratio $D_{ij}$ as the price of product $i$ varies: logit's
+share-proportional diversion falls as $p_i$ rises; linear's is constant.}
+\label{fig:div}
+\end{figure}
+
+\section{Supply side: FOCs, ownership matrix, equilibrium}
+\label{sec:supply}
+
+Firm $f$'s FOC for product $i \in f$ (per capita, dividing by $M$):
+\begin{equation}\label{eq:foc}
+r_i(p) = s_i + \sum_{k:\, \Omega_{ik}=1} (p_k - c_k)\, \frac{\partial s_k}{\partial p_i} = 0 .
+\end{equation}
+This is \path|Market.foc| (\path|python/mergersim/market.py:63|), generic over the
+demand class (it uses \path|demand.shares| and \path|demand.jacobian|).
+
+\path|Market.solve_prices| (\path|market.py:72|) collects candidate solutions and
+returns the one with the smallest FOC residual:
+\begin{itemize}
+\item \textbf{linear demand}: the closed form, Eq.~\eqref{eq:closedform}
+  (\path|demand.py:165|);
+\item \textbf{logit demand}: the markup fixed-point iteration (Morrow--Skerlos style,
+  \cite{morrow2011}),
+  \begin{equation}\label{eq:fp}
+  m_i \leftarrow \frac{1/a + \sum_{j \in f,\, j \neq i} m_j s_j}{1 - s_i},
+  \qquad p_i = c_i + m_i ,
+  \end{equation}
+  implemented in \path|Market._fixed_point| (\path|market.py:96|);
+\item \textbf{both}: \texttt{scipy.optimize.root} on the FOCs as a fallback/refinement.
+\end{itemize}
+
+Pre-merger, the observed prices should satisfy the FOCs (this is what identifies
+costs/demand); the test \path|test_premerger_foc_holds|
+(\path|python/tests/test_mergersim.py:39|) checks this on a synthetic market, and
+\path|test_calibration_recovers_a| / \path|test_calibration_recovers_B|
+(\path|python/tests/test_linear.py:12|) check that calibration recovers the true demand
+parameters exactly.
+
+\section{The merger simulation algorithm --- \texttt{simulate\_merger} (\path|python/mergersim/simulation.py:58|)}
+\label{sec:algorithm}
+
+Given a calibrated \path|Market| and the merging firms $M_{set}$:
+\begin{enumerate}
+\item \textbf{New ownership}: all products of firms in $M_{set}$ get one firm id
+  $\to \Omega^{post}$ (lines 64--66 of \path|simulation.py|).
+\item \textbf{Efficiencies}: \texttt{efficiency} $E$ is a proportional marginal-cost
+  saving on the merging firms' products: $c_j^{post} = (1-E)c_j$ (lines 67--69).
+\item \textbf{Re-solve equilibrium}: $p^{post}$ = \path|Market.solve_prices| under
+  $\Omega^{post}$, starting from observed prices (line 71).
+\item \textbf{Compare}: \path|_snapshot| (\path|simulation.py:31|) computes for pre and
+  post: prices, shares, quantities, margins, per-firm profits (\path|Market.profits|,
+  \path|market.py:110|), HHI on inside shares renormalised to sum to 1
+  (\path|Market.hhi|, \path|market.py:58|), and consumer surplus $M \cdot CS(p)$.
+\item \textbf{Diagnostics}: UPP (Section~\ref{sec:diagnostics}), diversion matrix,
+  per-product table via \path|report| (\path|simulation.py:86|).
+\end{enumerate}
+
+Usage (see \path|python/examples/run_cereal_merger.py:13|):
+\begin{verbatim}
+m = nevo_market("C01Q1", lerner=0.3, demand_type="logit")  # or "linear"
+res = simulate_merger(m, merging_firms=[1, 2], efficiency=0.05)
+table, summary = report(res)  # per-product price/share changes + UPP; HHI/CS/profit
+\end{verbatim}
+
+\section{Diagnostics}
+\label{sec:diagnostics}
+
+\textbf{Upward pricing pressure} \cite{farrell2010}, \path|upward_pricing_pressure|
+(\path|simulation.py:45|): for each product $i$ of the merging firms,
+\begin{equation}\label{eq:upp}
+UPP_i = \sum_{j \in M_{set},\, j \neq i} D_{ij}\,(p_j - c_j) \;-\; E_i\, c_i .
+\end{equation}
+Under logit, $D_{ij} = s_j/(1-s_i)$ (Eq.~\eqref{eq:logitD}); under linear,
+$D_{ij} = -B_{ij}/B_{jj}$. UPP predicts the \emph{sign} of the price effect robustly,
+not the magnitude:
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.6\textwidth]{figures/fig4_upp_vs_dp.png}
+\caption{UPP$_i$ vs.\ the full-simulation price change $\Delta p_i$ (logit, cereal
+C01Q1, firms 1+2): positive UPP $\iff$ positive $\Delta p$, but magnitudes differ.}
+\label{fig:upp}
+\end{figure}
+
+\textbf{HHI}: \path|Market.hhi| (\path|market.py:58|),
+$10000 \sum_f (s_f / \sum_g s_g)^2$. \textbf{Diversion}: \path|demand.diversion_ratios|
+(\path|demand.py:77| / \path|:151|). \textbf{Welfare}: consumer surplus $+$ total
+profit, pre vs.\ post (\path|report|).
+
+\section{Numerical illustration: same merger, two demand forms}
+\label{sec:numerics}
+
+Cereal market C01Q1 (24 products, 5 firms), constant Lerner margin 0.3 (the data has no
+cost column), merger of firms 1 and 2, no efficiencies. Run:
+\path|PYTHONPATH=python python python/examples/run_logit_vs_linear.py|
+(\path|examples/run_logit_vs_linear.py:14|).
+
+\begin{table}[h]
+\centering
+\caption{Merger of firms 1 and 2, cereal market C01Q1: logit vs.\ linear demand}
+\label{tab:cereal}
+\begin{tabular}{@{}lrr@{}}
+\toprule
+ & logit & linear \\
+\midrule
+mean $\Delta p$ of merging products & $+29.6\%$ (max $+73.2\%$) & $+176.9\%$ (max $+525.5\%$) \\
+min post-merger share & $+0.0027$ (valid) & $-0.59$ (invalid --- linear pathology) \\
+HHI & $3593 \to 4134$ & $3593 \to 2890$ (meaningless: negative shares) \\
+consumer surplus & $0.0221 \to 0.0127$ & $0.0227 \to 0.0143$ \\
+total profit & $0.0312 \to 0.0515$ & $0.0170 \to 0.2497$ \\
+max UPP & $0.0241$ & $0.0130$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+For a smaller merger (firms 1+3) where linear shares stay positive, the two models agree
+more closely: logit $+13.3\%$ vs.\ linear $+18.0\%$ mean price change. Takeaways: both
+models predict the same \emph{sign} (prices rise, CS falls, profits rise --- the
+no-synergy result of \cite{farrell1990}), but \textbf{magnitudes are sensitive to the
+demand form} \cite{crooke1999}, and linear demand can produce invalid (negative) shares
+and implausible corner prices for niche products --- which is why logit (or richer
+systems) dominates agency practice.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=\textwidth]{figures/fig3_cereal_logit_vs_linear.png}
+\caption{Per-product post-merger price change, merger of firms 1+2 in cereal market
+C01Q1, logit vs.\ linear. Generated by \path|python/examples/make_figures.py:20|.}
+\label{fig:cereal}
+\end{figure}
+
+\section{Code map}
+\label{sec:codemap}
+
+\begin{table}[h]
+\centering
+\caption{Code map: file $\to$ symbol (line) $\to$ what it does}
+\label{tab:codemap}
+\begin{tabular}{@{}lll@{}}
+\toprule
+file & symbol & line \\
+\midrule
+\path|python/mergersim/demand.py| & \path|LogitDemand| & 19 \\
+ & \quad calibration & 28 \\
+\path|python/mergersim/demand.py| & \path|LinearDemand| & 92 \\
+ & \quad calibration & 112 \\
+ & \quad closed-form prices & 165 \\
+\path|python/mergersim/market.py| & \path|Market.calibrated| & 25 \\
+ & \path|Market.foc| / \path|solve_prices| / \path|_fixed_point| & 63 / 72 / 96 \\
+ & \path|Market.hhi|, \path|ownership|, \path|profits|, \path|equilibrium| & 58, 48, 110, 119 \\
+\path|python/mergersim/simulation.py| & \path|simulate_merger| & 58 \\
+ & \path|upward_pricing_pressure| & 45 \\
+ & \path|report| & 86 \\
+\path|python/mergersim/data.py| & \path|nevo_market|, \path|synthetic_market|, \path|synthetic_linear_market| & 27, 51, 81 \\
+\path|python/examples/| & \path|run_cereal_merger.py|, \path|run_logit_vs_linear.py|, \path|run_synthetic.py|, \path|make_figures.py| & 13, 14, 13, 20 \\
+\path|python/tests/| & \path|test_mergersim.py|, \path|test_linear.py| & --- \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The test suites (19 tests) cover: calibration recovery of the true demand parameters,
+FOC validity pre- and post-merger, merger price/CS/HHI/UPP properties, and the
+demand-form differences (negative linear shares vs.\ bounded logit shares).
+
+\section{Limitations and natural extensions}
+\label{sec:limits}
+
+\begin{itemize}
+\item \textbf{Richer demand}: nested logit, random-coefficients logit
+  \cite{blp1995,nevo2001} --- estimation via PyBLP (\texttt{pyblp}), then feed estimated
+  parameters into the same \path|Market| / \path|simulate_merger| machinery; AIDS
+  \cite{hlz1994} as an alternative.
+\item \textbf{Multi-market}: loop \path|nevo_market| over all 94 cereal markets and
+  average effects.
+\item \textbf{Efficiencies} (\texttt{efficiency=} in \path|simulate_merger|), product
+  repositioning, entry, and dynamic effects \cite{doraszelski2008} are not modelled.
+\item \textbf{Bargained prices} (hospitals, \cite{gnt2015}) need a different conduct
+  assumption than Nash--Bertrand.
+\item \textbf{Linear demand caveats} (\S\ref{sec:demand}): use it for small price
+  changes / teaching; prefer logit$+$ when an outside good matters or price changes are
+  large.
+\end{itemize}
+
+\begin{thebibliography}{99}
+
+\bibitem{farrell1990}
+J.~Farrell and C.~Shapiro, ``Horizontal Mergers: An Equilibrium Analysis,''
+\emph{American Economic Review} 80(1):107--126, 1990.
+
+\bibitem{farrell2010}
+J.~Farrell and C.~Shapiro, ``Antitrust Evaluation of Horizontal Mergers: An Economic
+Alternative to Market Definition,'' \emph{B.E. Journal of Theoretical Economics}
+10(1), Article 9, 2010. Open access: \url{https://faculty.haas.berkeley.edu/shapiro/alternative.pdf}
+
+\bibitem{hlz1994}
+J.~Hausman, G.~Leonard and J.\,D.~Zona, ``Competitive Analysis with Differentiated
+Products,'' \emph{Annales d'\'Economie et de Statistique} 34:159--180, 1994.
+
+\bibitem{werden1994}
+G.~Werden and L.~Froeb, ``The Effects of Mergers in Differentiated Products Industries:
+Logit Demand and Merger Policy,'' \emph{Journal of Law, Economics, and Organization}
+10(2):407--426, 1994.
+
+\bibitem{crooke1999}
+P.~Crooke, L.~Froeb, S.~Tschantz and G.~Werden, ``Effects of Assumed Demand Form on
+Simulated Post-Merger Equilibria,'' \emph{Review of Industrial Organization}
+15:205--220, 1999.
+
+\bibitem{froeb2005}
+L.~Froeb, S.~Tschantz and G.~Werden, ``The Effects of Merger Efficiencies on Consumers of
+Differentiated Products,'' \emph{European Competition Journal} 4(2):245--262, 2005.
+
+\bibitem{epstein2001}
+R.~Epstein and D.~Rubinfeld, ``Merger Simulation: A Simplified Approach with New
+Applications,'' UC Berkeley working paper, 2001.
+
+\bibitem{berry1994}
+S.~Berry, ``Estimating Discrete-Choice Models of Product Differentiation,''
+\emph{RAND Journal of Economics} 25(2):242--262, 1994.
+
+\bibitem{blp1995}
+S.~Berry, J.~Levinsohn and A.~Pakes, ``Automobile Prices in Market Equilibrium,''
+\emph{Econometrica} 63(4):841--890, 1995.
+
+\bibitem{nevo2000}
+A.~Nevo, ``Mergers with Differentiated Products: The Case of the Ready-to-Eat Cereal
+Industry,'' \emph{RAND Journal of Economics} 31(3):395--421, 2000.
+
+\bibitem{nevo2000guide}
+A.~Nevo, ``A Practitioner's Guide to Estimation of Random-Coefficients Logit Models of
+Demand,'' \emph{Journal of Economic Management and Strategy} 9(4):513--548, 2000.
+
+\bibitem{nevo2001}
+A.~Nevo, ``Measuring Market Power in the Ready-to-Eat Cereal Industry,''
+\emph{Econometrica} 68(2):307--342, 2001.
+
+\bibitem{ivaldi2005}
+M.~Ivaldi and F.~Verboven, ``Quantifying the Effects from Horizontal Mergers in European
+Competition Policy,'' \emph{International Journal of Industrial Organization}
+23(4):345--369, 2005.
+
+\bibitem{peters2006}
+J.~Peters, ``Evaluating the Performance of Merger Simulation: Evidence from the U.S.
+Airline Industry,'' \emph{Journal of Law and Economics} 49(2):627--649, 2006.
+
+\bibitem{bjornerstedt2016}
+M.~Bj\"ornerstedt and F.~Verboven, ``Does Merger Simulation Work? A `Natural Experiment'
+in the Swedish Analgesics Market,'' \emph{Journal of Industrial Economics}
+64(4):550--582, 2016.
+
+\bibitem{miller2017}
+N.~Miller and M.~Weinberg, ``Understanding the Price Effects of the MillerCoors Joint
+Venture,'' \emph{Econometrica} 85(6):1763--1791, 2017.
+
+\bibitem{gnt2015}
+G.~Gowrisankaran, A.~Nevo and R.~Town, ``Mergers When Prices Are Negotiated: Evidence
+from the Hospital Industry,'' \emph{American Economic Review} 105(1):172--203, 2015.
+
+\bibitem{nocke2018}
+V.~Nocke and N.~Schutz, ``An Aggregative Games Approach to Merger Analysis in
+Multiproduct-Firm Oligopoly,'' CEPR DP 12905, 2018 (\emph{RAND Journal of Economics},
+2025).
+
+\bibitem{doraszelski2008}
+U.~Doraszelski and A.~Markovich, ``Identifying Dynamic Oligopoly Games,''
+\emph{Review of Economic Studies} 75(4):984--1004, 2008.
+
+\bibitem{budzinski2010}
+O.~Budzinski and I.~Ruhmer, ``Merger Simulation in Competition Policy: A Survey,''
+\emph{Journal of Competition Law \& Economics} 6(2):277--319, 2010.
+
+\bibitem{nevoWhinston2010}
+A.~Nevo and M.\,D.~Whinston, ``Taking the Dogma out of Econometrics: Structural Modeling
+and Credible Inference,'' \emph{Journal of Economic Perspectives} 24(2):69--82, 2010.
+
+\bibitem{morrow2011}
+J.~Morrow and S.~Skerlos, ``A Simple Estimator for the Equilibrium Distribution of
+Markups,'' \emph{RAND Journal of Economics} 42(4):1100--1121, 2011.
+
+\end{thebibliography}
+
+\end{document}
