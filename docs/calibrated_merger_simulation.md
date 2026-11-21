@@ -1,5 +1,7 @@
 # Calibrated merger simulation: how it works, and logit vs. linear demand
 
+> LaTeX version (canonical, with full step-by-step derivations, worked examples and exercises, for PDF): [calibrated_merger_simulation.tex](calibrated_merger_simulation.tex) / [compiled PDF](calibrated_merger_simulation.pdf) — compile from `docs/` with `pdflatex calibrated_merger_simulation.tex` (twice). This Markdown mirrors it for GitHub rendering; the key derivations are summarized in the appendix at the bottom.
+
 This note explains the mechanics of the calibrated merger simulation implemented in
 `python/mergersim/`, with the math behind each step, a side-by-side comparison of
 **logit** and **linear** demand, figures, and pointers to the exact lines of code that
@@ -258,3 +260,30 @@ Verboven (2005); Peters (2006); Björnerstedt & Verboven (2016); Miller & Weinbe
 (2017); Gowrisankaran, Nevo & Town (2015); Nocke & Schutz (2018); Doraszelski &
 Markovich (2008); Budzinski & Ruhmer (2010); Nevo & Whinston (2010); DOJ/FTC Merger
 Guidelines.
+
+## Appendix: the key derivations, step by step
+
+(Full versions with numbered equations, figures and exercises are in the [LaTeX/PDF](calibrated_merger_simulation.pdf), §3–§6 and §9.)
+
+**Logit shares and inversion.** With $u_{hj} = \delta_j + \varepsilon_{hj}$, $\varepsilon$ iid type-I EV, and $\delta_0 = 0$:
+$s_j = e^{\delta_j}/(1+\sum_k e^{\delta_k})$, so $\delta_j = \ln s_j - \ln s_0$ with $s_0 = 1-\sum_j s_j$. With $\delta_j = \beta_j - a p_j$:
+
+**Logit Jacobian** (quotient rule, $D = 1+\sum_k e^{\delta_k}$):
+$\partial s_j/\partial p_j = [e^{\delta_j}(-a)D - e^{\delta_j}e^{\delta_j}(-a)]/D^2 = -a s_j(1-s_j)$; for $k\neq j$, $\partial s_j/\partial p_k = a s_j s_k$. Elasticities: $\varepsilon_{jj} = -a p_j(1-s_j)$, $\varepsilon_{jk} = a p_k s_j$. Code: `demand.py:66,71`.
+
+**Logit calibration of $a$** from a single-product firm's FOC:
+$0 = s_j + (p_j-c_j)\partial s_j/\partial p_j = s_j[1 - a(p_j-c_j)(1-s_j)] \Rightarrow a = 1/[(p_j-c_j)(1-s_j)]$, averaged over products. Code: `demand.py:28`.
+
+**Logit diversion**: $D_{ij} \equiv -(\partial s_j/\partial p_i)/(\partial s_i/\partial p_i) = s_j/(1-s_i)$. Code: `demand.py:77`.
+
+**Logit CS**: expected max utility $V(p) = (1/a)\ln(1+\sum_j e^{\delta_j(p)})$; Roy: $s_j = -\partial V/\partial p_j$; quasi-linear $\Rightarrow \Delta CS = M[V(p^1)-V(p^0)]$. Code: `demand.py:84`.
+
+**Linear demand** $s = a - Bp$ comes from quadratic utility $U(s) = \alpha's - \frac12 s'B^{-1}s$ with $a = B\alpha$. Calibration: own slopes from FOC $B_{jj} = s_j/m_j$; cross slopes need diversion, $B_{ji} = -D_{ij}B_{ii}$ (default proxy $D_{ij}=s_j/(1-s_i)$). Code: `demand.py:112`.
+
+**Linear closed-form equilibrium**: FOC vector $r = s - B^{\top}(\Omega m) = 0$ with $s = a-Bp$, $m = p-c$ gives $p^{*} = (B+B^{\top}\Omega)^{-1}(a + B^{\top}\Omega c)$. Code: `demand.py:165`.
+
+**Multi-product FOC**: $r_i = s_i + \sum_k \Omega_{ik} m_k A_{ki} = 0$, $A_{ki} = \partial s_k/\partial p_i$. Code: `market.py:63`.
+
+**Logit fixed point** (solve the FOC for $m_i$): $m_i = (1/a + \sum_{k\in f, k\neq i} m_k s_k)/(1-s_i)$, $p_i = c_i + m_i$. Code: `market.py:96`.
+
+**UPP, two-product derivation** (Farrell–Shapiro 2010): pre-merger $1/a = m_i(1-s_i)$; post-merger FOC $s_i - a m_i' s_i(1-s_i) + a m_j s_i s_j = 0$ with $m_i' = p_i - (1-E_i)c_i$. Linearising around pre-merger prices: $\Delta p_i = m_j s_j/(1-s_i) - E_i c_i = D_{ij}(p_j-c_j) - E_i c_i = UPP_i$. Multi-product: $UPP_i = \sum_{j\in M, j\neq i} D_{ij}m_j - E_i c_i$. Code: `simulation.py:45`. Worked example: $s_i=s_j=0.2$, $p=\$1$, $c=\$0.70$ $\Rightarrow$ $D=0.25$, $UPP = 0.25\times0.30 = \$0.075$.
