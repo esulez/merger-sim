@@ -7,7 +7,7 @@ from dataclasses import dataclass
 import numpy as np
 from scipy.optimize import root
 
-from .demand import LogitDemand
+from .demand import LinearDemand, LogitDemand
 
 
 @dataclass
@@ -22,14 +22,27 @@ class Market:
     costs: np.ndarray
 
     @classmethod
-    def calibrated(cls, product_ids, firm_ids, prices, shares, margins=None, lerner=None, market_size=1.0):
-        """Build a market by calibrating logit demand from observed data; costs = prices - margins."""
+    def calibrated(cls, product_ids, firm_ids, prices, shares, margins=None, lerner=None,
+                   market_size=1.0, demand_type="logit", diversion=None):
+        """Build a market by calibrating demand from observed data; costs = prices - margins.
+
+        ``demand_type`` is "logit" (default) or "linear"; ``diversion`` is only used for
+        linear demand (estimated diversion matrix; defaults to share-proportional proxy).
+        """
         prices = np.asarray(prices, dtype=float)
         shares = np.asarray(shares, dtype=float)
-        demand = LogitDemand.calibrate(shares, prices, margins=margins, lerner=lerner, market_size=market_size)
         if margins is None:
+            if lerner is None:
+                raise ValueError("provide either margins or a constant lerner margin")
             margins = float(lerner) * prices
-        costs = prices - np.asarray(margins, dtype=float)
+        margins = np.asarray(margins, dtype=float)
+        costs = prices - margins
+        if demand_type == "logit":
+            demand = LogitDemand.calibrate(shares, prices, margins=margins, market_size=market_size)
+        elif demand_type == "linear":
+            demand = LinearDemand.calibrate(shares, prices, margins, market_size=market_size, diversion=diversion)
+        else:
+            raise ValueError(f"unknown demand_type {demand_type!r}")
         return cls(list(product_ids), np.asarray(firm_ids), prices, shares, demand, costs)
 
     def ownership(self, firm_ids=None):
@@ -43,8 +56,9 @@ class Market:
         return np.array([s[f == k].sum() for k in np.unique(f)])
 
     def hhi(self, shares=None, firm_ids=None):
+        """HHI in points over firms, with inside shares renormalised to sum to 1."""
         fs = self.firm_shares(shares, firm_ids)
-        return float(10000.0 * np.sum(fs ** 2))
+        return float(10000.0 * np.sum((fs / fs.sum()) ** 2))
 
     def foc(self, prices, firm_ids=None):
         """Pricing FOC residuals: r_i = s_i + sum_k O[i,k] (p_k - c_k) ds_k/dp_i = 0 at equilibrium."""
@@ -58,24 +72,26 @@ class Market:
     def solve_prices(self, firm_ids=None, p0=None):
         """Solve the Nash-Bertrand equilibrium price vector for the given ownership.
 
-        Primary solver is the logit markup fixed-point iteration
-        (Morrow-Skerlos 2011 style): m_i = (1/a + sum_{j in firm(i), j != i} m_j s_j) / (1 - s_i);
-        scipy root-finding is used as a fallback/refinement.
+        Solvers, tried and the best (smallest FOC residual) returned: closed form for
+        linear demand; the logit markup fixed-point iteration (Morrow-Skerlos 2011 style),
+        m_i = (1/a + sum_{j in firm(i), j != i} m_j s_j) / (1 - s_i); scipy root-finding.
         """
         p0 = np.asarray(self.prices if p0 is None else p0, dtype=float)
-        p = self._fixed_point(firm_ids, p0)
-        best_res = float(np.max(np.abs(self.foc(p, firm_ids))))
-        if best_res > 1e-9:
-            for method in ("hybr", "lm"):
-                sol = root(self.foc, p, args=(firm_ids,), method=method)
-                res = float(np.max(np.abs(self.foc(sol.x, firm_ids))))
-                if res < best_res:
-                    p, best_res = sol.x, res
-                if best_res < 1e-10:
-                    break
+        O = self.ownership(firm_ids)
+        candidates = []
+        closed_form = getattr(self.demand, "closed_form_prices", None)
+        if closed_form is not None:
+            candidates.append(closed_form(self.costs, O))
+        if hasattr(self.demand, "a"):
+            candidates.append(self._fixed_point(firm_ids, p0))
+        for method in ("hybr", "lm"):
+            sol = root(self.foc, p0, args=(firm_ids,), method=method)
+            candidates.append(sol.x)
+        best = min(candidates, key=lambda x: float(np.max(np.abs(self.foc(x, firm_ids)))))
+        best_res = float(np.max(np.abs(self.foc(best, firm_ids))))
         if best_res > 1e-7:
             raise RuntimeError(f"pricing equilibrium did not converge (max FOC residual {best_res:.2e})")
-        return p
+        return best
 
     def _fixed_point(self, firm_ids, p0, max_iter=5000, tol=1e-12):
         p = p0.astype(float).copy()

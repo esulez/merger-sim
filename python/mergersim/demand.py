@@ -87,3 +87,83 @@ class LogitDemand:
         m = max(0.0, float(d.max()))
         lse = m + np.log(np.exp(-m) + np.exp(d - m).sum())
         return lse / self.a
+
+
+class LinearDemand:
+    """Linear demand over inside goods only (no outside good), per capita: s(p) = a - B p.
+
+    ``B[j, i] = -ds_j/dp_i``: positive diagonal, non-positive off-diagonal for substitutes.
+    Quantities are market_size * s. Calibration: with single-product firms the pre-merger
+    FOC gives B_jj = q_j / m_j; cross slopes are NOT identified from one market's
+    (shares, prices, margins) and require diversion ratios, since D_ij = -B_ij / B_jj,
+    i.e. B_ij = -D_ij * B_jj. By default D is proxied by the share-proportional (logit-style)
+    ratio s_j / (1 - s_i); pass ``diversion`` to use estimated diversion ratios.
+
+    Caveats vs logit: shares can go negative at high prices, shares of inside goods sum to
+    one (no outside good), and diversion ratios are constant in prices.
+    """
+
+    def __init__(self, intercepts, B, market_size=1.0):
+        self.intercepts = np.asarray(intercepts, dtype=float)
+        self.B = np.asarray(B, dtype=float)
+        self.market_size = float(market_size)
+
+    @classmethod
+    def calibrate(cls, shares, prices, margins, market_size=1.0, diversion=None):
+        s = np.asarray(shares, dtype=float)
+        p = np.asarray(prices, dtype=float)
+        m = np.asarray(margins, dtype=float)
+        if np.any(m <= 0):
+            raise ValueError("margins must be positive")
+        own = s / m  # per-capita FOC: s_j = m_j * B_jj
+        if diversion is None:
+            D = s[None, :] / (1.0 - s[:, None])
+            np.fill_diagonal(D, 0.0)
+        else:
+            D = np.asarray(diversion, dtype=float)
+        J = p.size
+        B = np.zeros((J, J))
+        for i in range(J):
+            for j in range(J):
+                B[i, j] = own[i] if i == j else -D[i, j] * own[j]
+        a = s + B @ p
+        return cls(a, B, market_size=float(market_size))
+
+    def shares(self, prices):
+        return self.intercepts - self.B @ np.asarray(prices, dtype=float)
+
+    def outside_share(self, prices):
+        return 0.0
+
+    def quantities(self, prices):
+        return self.market_size * self.shares(prices)
+
+    def jacobian(self, prices):
+        """A[j, i] = ds_j / dp_i = -B[j, i] (constant in prices)."""
+        return -self.B
+
+    def elasticities(self, prices):
+        """E[j, i] = (p_i / s_j) * ds_j / dp_i."""
+        s = self.shares(prices)
+        p = np.asarray(prices, dtype=float)
+        return (-self.B) * p[None, :] / s[:, None]
+
+    def diversion_ratios(self, prices=None):
+        """D[i, j] = -B[i, j] / B[j, j] for i != j (constant in prices for linear demand)."""
+        D = -self.B / np.diag(self.B)[None, :]
+        np.fill_diagonal(D, 0.0)
+        return D
+
+    def consumer_surplus(self, prices):
+        """Per-capita CS of the quasi-linear utility behind s = a - B p (exact quadratic form)."""
+        p = np.asarray(prices, dtype=float)
+        s = self.shares(p)
+        Binv = np.linalg.inv(self.B)
+        alpha = Binv @ self.intercepts
+        return float(alpha @ s - 0.5 * s @ Binv @ s - p @ s)
+
+    def closed_form_prices(self, costs, ownership):
+        """Exact Nash-Bertrand prices: p = (B + B^T O)^-1 (a + B^T O c)."""
+        c = np.asarray(costs, dtype=float)
+        O = np.asarray(ownership, dtype=float)
+        return np.linalg.solve(self.B + self.B.T @ O, self.intercepts + self.B.T @ O @ c)
